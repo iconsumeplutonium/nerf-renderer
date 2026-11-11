@@ -1,0 +1,8 @@
+nerf
+*.elf
+*.vxbin
+*.dump
+*.o
+.depend
+config.stamp*
+*.log
