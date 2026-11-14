@@ -4,6 +4,7 @@ import numpy as np
 from tqdm import tqdm
 import torch.nn as nn
 from PIL import Image
+from torch import Tensor
 
 # adapted from https://papers-100-lines.medium.com/instant-3d-reconstruction-with-python-and-instant-ngp-68973cd6f706
 # the original didnt work and was stuck in dependency hell so an llm rewrite it to make it work and not shit
@@ -16,12 +17,156 @@ MAX_STEPS = None          # stop training after this many steps (None = full epo
 TEST_IMAGES = 2           # number of novel views to render (original: 200)
 TEST_CHUNK_ROWS = 1       # image rows rendered at once (5 * 800 = 4000 rays)
 H, W = 800, 800
-HN, HF = 2, 6
-SKIP_TRAIN = False
+HN, HF = 2, 6             # distance to the near plane and far plane
+SKIP_TRAIN = True
+
+class NGP(torch.nn.Module):
+    def __init__(self, numRows: int, gridResolutions: list[int], frequencies: int, device: str, aabbScale: int, featuresPerEntry: int = 2):
+        super(NGP, self).__init__()
+
+        # the number of rows in the hash table (2^19 apparently, in the instant ngp paper)
+        self.hashTableRows: int = numRows
+
+        # list with the grid resolution of each level (16 to 2048). len(gridResolutions) is the number of levels (16)
+        # so this stores [16, 22, 30, 42, 58, ..., 1072, 1481, 2048]
+        self.gridResolutions: list[int] = gridResolutions
+        
+        # number of features per hash table entry (2). so the hash table is hashTableRows rows by featuresPerEntry columns (2^19  by 2)
+        self.featuresPerEntry: int = featuresPerEntry
+        
+        # number of frequencies used to encode viewing direction (see positional_encoding)
+        self.numFrequencies: int = frequencies 
+        
+        # aabbScale = 3 means the scene fits in a 3x3x3 cube. in forward(), it uses this to convert to a unit cube ((x / aabb scale) + 0.5)
+        self.aabbScale: int = aabbScale
+
+        # create lookup tables with wierd pytorch syntax. 
+        # use torch.rand values in [0, 1], then bring them into the range [-1, 1], then scale by 1e-4. apparently instant-ngp does this.
+        # this wacky syntax lets it do it all in one go i guess
+        self.lookupTables: torch.nn.ParameterDict = torch.nn.ParameterDict(
+            {str(i): torch.nn.Parameter((torch.rand((numRows, 2), device=device) * 2 - 1) * 1e-4) for i in range(len(gridResolutions))}
+        )
+
+        # the three random primes for hashing
+        self.prime1: int = 1
+        self.prime2: int = 2_654_435_761
+        self.prime3: int = 805_459_861
+
+        # the two neural networks for density and color
+        self.density_MLP: nn.Sequential = nn.Sequential(nn.Linear(self.featuresPerEntry * len(gridResolutions), 64),
+                                          nn.ReLU(), 
+                                          nn.Linear(64, 16)).to(device)
+        self.color_MLP: nn.Sequential = nn.Sequential(nn.Linear(27 + 16, 64), 
+                                        nn.ReLU(),
+                                        nn.Linear(64, 64),
+                                        nn.ReLU(),
+                                        nn.Linear(64, 3), 
+                                        nn.Sigmoid()).to(device)
+
+    # poor man's spherical harmonics
+    # the color of a point depends on the direction you view it from. in gaussian splats/instant ngp, 
+    # you use spherical harmonics. here, we use a simpler version. (L = 4)
+    # the positional encoding becomes [x, sin(x), cos(x), sin(2x), cos(2x), sin(4x), cos(4x), sin(8x), cos(8x)]
+    def positional_encoding(self, x: Tensor) -> Tensor:
+        out: list[Tensor] = [x]
+        for i in range(self.numFrequencies):
+            out.append(torch.sin(2**i * x))
+            out.append(torch.cos(2**i * x))
+
+        return torch.cat(out, dim=1)
+
+    # x is a tensor of size (BxN, 3) where B is the number of rays, and N is samples per ray (3 for xyz)
+    # in render_rays, it builds a tensor of (B rays) by (N samples per ray) by 3. this gets flattened into (BxN, 3), ie a giant list of sample points.
+    # -----
+    # d is just the ray direction for each point. for example:
+    #
+    # x (6 rows)                   d (6 rows)
+    # ray 0, sample 0: (x,y,z)     ray 0's direction
+    # ray 0, sample 1: (x,y,z)     ray 0's direction
+    # ray 0, sample 2: (x,y,z)     ray 0's direction
+    # ray 1, sample 0: (x,y,z)     ray 1's direction
+    # ray 1, sample 1: (x,y,z)     ray 1's direction
+    # ray 1, sample 2: (x,y,z)     ray 1's direction
+    def forward(self, x: Tensor, d: Tensor):
+        # scale x by aabbScale, to bring the whole scene into the range [-0.5, 0.5]^3 (not in-place to avoid mutating the caller's tensor)
+        x = x / self.aabbScale
+
+        # weird pytorch syntax to get a list of the indices of all points inside [-0.5, 0.5]^3
+        idx: Tensor = (x.abs() < .5).all(dim=1).nonzero(as_tuple=True)[0]
+
+        # if all points are outside the box, return 0 for color and density
+        color: Tensor = torch.zeros((x.shape[0], 3), device=x.device)
+        if idx.numel() == 0:
+            return color, torch.zeros(x.shape[0], device=x.device)
+
+        xm: Tensor = x[idx] + 0.5   # all points inside the box, shifted to be in [0, 1]^3
+        dm: Tensor = d[idx]         # viewing directions for all points in the box
+
+        # 1D tensor of length (num rays x num samples per ray), with all values set to -100,000 (because e^-100000 is 0 in floating piont. the last line of this 
+        # function does torch.exp(log_sigma)). so untouched values = values with 0 density = stay 0 
+        log_sigma: Tensor = torch.full((x.shape[0],), -100000., device=x.device)
+
+        # 2D tensor of (K, 32) where K is (num rays x samples per ray) and 32 is because (2 features per entry * 16 grid resolutions)
+        # so the tensor is (sample point of a ray, every single grid resolution entyr for that point)
+        features: Tensor = torch.empty((xm.shape[0], self.featuresPerEntry * len(self.gridResolutions)), device=x.device)
+
+        # loop over each resolution, and figure out all sample points in a given resolution at once
+        for i, N in enumerate(self.gridResolutions):
+            # figure out the corners for each point's box
+            floor: Tensor = torch.floor(xm * N)
+            ceil: Tensor = torch.ceil(xm * N)
+
+            # get the integer coordinates for all 8 corners
+            vertices: Tensor = torch.zeros((xm.shape[0], 8, 3), dtype=torch.int64, device=x.device)
+            vertices[:, 0] = floor
+            vertices[:, 1] = torch.cat(( ceil[:, 0, None], floor[:, 1, None], floor[:, 2, None]), dim=1)
+            vertices[:, 2] = torch.cat((floor[:, 0, None], ceil [:, 1, None], floor[:, 2, None]), dim=1)
+            vertices[:, 3] = torch.cat(( ceil[:, 0, None], ceil [:, 1, None], floor[:, 2, None]), dim=1)
+            vertices[:, 4] = torch.cat((floor[:, 0, None], floor[:, 1, None], ceil [:, 2, None]), dim=1)
+            vertices[:, 5] = torch.cat(( ceil[:, 0, None], floor[:, 1, None], ceil [:, 2, None]), dim=1)
+            vertices[:, 6] = torch.cat((floor[:, 0, None], ceil [:, 1, None], ceil [:, 2, None]), dim=1)
+            vertices[:, 7] = ceil
+
+            # hash each corner and get its index into the lookup table
+            a: Tensor = vertices[:, :, 0] * self.prime1
+            b: Tensor = vertices[:, :, 1] * self.prime2
+            c: Tensor = vertices[:, :, 2] * self.prime3
+            h_x: Tensor = torch.remainder(torch.bitwise_xor(torch.bitwise_xor(a, b), c), self.hashTableRows)
+
+            # Lookup
+            # (num points, 8 corner point indices, 2 features per corner), which is then reshaped into (num points, 2 features, 8 corner indices)
+            looked_up: Tensor = self.lookupTables[str(i)][h_x].transpose(-1, -2)
+
+            # reshape into (num points, 2 features, 2 z indices, 2 y indices, 2 x indices)
+            volume: Tensor = looked_up.reshape((looked_up.shape[0], 2, 2, 2, 2))
+
+            # the final feature. abuses pytorch's grid_sample function to do trilinear interpolation for each point's grid corners
+            features[:, i * 2:(i + 1) * 2] = torch.nn.functional.grid_sample(
+                volume,
+                ((xm * N - floor) - 0.5).unsqueeze(1).unsqueeze(1).unsqueeze(1),
+                align_corners=False,  # same as the old default, just silences the warning
+            ).squeeze(-1).squeeze(-1).squeeze(-1)
+
+        # get the frequency encoding for each position (so it can learn view dependent color i guess)
+        xi: Tensor = self.positional_encoding(dm)
+
+        # put the sample points and 2 features per grid resolution into the density mlp, which returns a (num points, 16) tensor
+        # where col 0 is the log of the desnity, and col 1-15 is some bullshit numbers representing the local geometry/density/whatever
+        h: Tensor = self.density_MLP(features)
+
+        # store the log densities in log_sigma
+        log_sigma[idx] = h[:, 0]
+
+        # put the density tensor and the frequency encoding through the color mlp, which returns a predicted rgb color in the range [0, 1]
+        # store these in color 
+        color[idx] = self.color_MLP(torch.cat((h, xi), dim=1))
+
+        # return the predicted colors and predicted log density for this pass
+        return color, torch.exp(log_sigma)
 
 
 @torch.no_grad()
-def test(model, device, hn, hf, dataset, img_index, chunk_size=5, nb_bins=192, H=400, W=400):
+def test(model: NGP, device: str, hn, hf, dataset, img_index, chunk_size=5, nb_bins=192, H=400, W=400):
     # dataset is a numpy memmap: only the slice we need is read into RAM
     sl = slice(img_index * H * W, (img_index + 1) * H * W)
     ray_origins = torch.from_numpy(np.array(dataset[sl, :3]))
@@ -36,83 +181,6 @@ def test(model, device, hn, hf, dataset, img_index, chunk_size=5, nb_bins=192, H
     img = (img.clip(0, 1) * 255.).astype(np.uint8)
     Image.fromarray(img).save(f'novel_views/full_img_{img_index}.png')
 
-
-class NGP(torch.nn.Module):
-
-    def __init__(self, T, Nl, L, device, aabb_scale, F=2):
-        super(NGP, self).__init__()
-        self.T = T
-        self.Nl = Nl
-        self.F = F
-        self.L = L  # For encoding directions
-        self.aabb_scale = aabb_scale
-        self.lookup_tables = torch.nn.ParameterDict(
-            {str(i): torch.nn.Parameter((torch.rand(
-                (T, 2), device=device) * 2 - 1) * 1e-4) for i in range(len(Nl))})
-        self.pi1, self.pi2, self.pi3 = 1, 2_654_435_761, 805_459_861
-        self.density_MLP = nn.Sequential(nn.Linear(self.F * len(Nl), 64),
-                                         nn.ReLU(), nn.Linear(64, 16)).to(device)
-        self.color_MLP = nn.Sequential(nn.Linear(27 + 16, 64), nn.ReLU(),
-                                       nn.Linear(64, 64), nn.ReLU(),
-                                       nn.Linear(64, 3), nn.Sigmoid()).to(device)
-
-    def positional_encoding(self, x):
-        out = [x]
-        for j in range(self.L):
-            out.append(torch.sin(2 ** j * x))
-            out.append(torch.cos(2 ** j * x))
-        return torch.cat(out, dim=1)
-
-    def forward(self, x, d):
-        x = x / self.aabb_scale  # not in-place: don't mutate the caller's tensor
-        # Indices of points inside the bounding box, computed once
-        idx = (x.abs() < .5).all(dim=1).nonzero(as_tuple=True)[0]
-
-        color = torch.zeros((x.shape[0], 3), device=x.device)
-        if idx.numel() == 0:
-            # nothing in the box: zero density everywhere (matches exp(-100000) == 0)
-            return color, torch.zeros(x.shape[0], device=x.device)
-
-        xm = x[idx] + 0.5   # masked points, in [0, 1]^3
-        dm = d[idx]         # masked directions
-
-        log_sigma = torch.full((x.shape[0],), -100000., device=x.device)
-        features = torch.empty((xm.shape[0], self.F * len(self.Nl)), device=x.device)
-
-        for i, N in enumerate(self.Nl):
-            # Computing vertices, use nn.functional.grid_sample convention
-            floor = torch.floor(xm * N)
-            ceil = torch.ceil(xm * N)
-            vertices = torch.zeros((xm.shape[0], 8, 3), dtype=torch.int64, device=x.device)
-            vertices[:, 0] = floor
-            vertices[:, 1] = torch.cat((ceil[:, 0, None], floor[:, 1, None], floor[:, 2, None]), dim=1)
-            vertices[:, 2] = torch.cat((floor[:, 0, None], ceil[:, 1, None], floor[:, 2, None]), dim=1)
-            vertices[:, 4] = torch.cat((floor[:, 0, None], floor[:, 1, None], ceil[:, 2, None]), dim=1)
-            vertices[:, 6] = torch.cat((floor[:, 0, None], ceil[:, 1, None], ceil[:, 2, None]), dim=1)
-            vertices[:, 5] = torch.cat((ceil[:, 0, None], floor[:, 1, None], ceil[:, 2, None]), dim=1)
-            vertices[:, 3] = torch.cat((ceil[:, 0, None], ceil[:, 1, None], floor[:, 2, None]), dim=1)
-            vertices[:, 7] = ceil
-
-            # hashing
-            a = vertices[:, :, 0] * self.pi1
-            b = vertices[:, :, 1] * self.pi2
-            c = vertices[:, :, 2] * self.pi3
-            h_x = torch.remainder(torch.bitwise_xor(torch.bitwise_xor(a, b), c), self.T)
-
-            # Lookup
-            looked_up = self.lookup_tables[str(i)][h_x].transpose(-1, -2)
-            volume = looked_up.reshape((looked_up.shape[0], 2, 2, 2, 2))
-            features[:, i * 2:(i + 1) * 2] = torch.nn.functional.grid_sample(
-                volume,
-                ((xm * N - floor) - 0.5).unsqueeze(1).unsqueeze(1).unsqueeze(1),
-                align_corners=False,  # same as the old default, just silences the warning
-            ).squeeze(-1).squeeze(-1).squeeze(-1)
-
-        xi = self.positional_encoding(dm)
-        h = self.density_MLP(features)
-        log_sigma[idx] = h[:, 0]
-        color[idx] = self.color_MLP(torch.cat((h, xi), dim=1))
-        return color, torch.exp(log_sigma)
 
 
 def compute_accumulated_transmittance(alphas):
@@ -130,7 +198,7 @@ def render_rays(nerf_model, ray_origins, ray_directions, hn=0, hf=0.5, nb_bins=1
     upper = torch.cat((mid, t[:, -1:]), -1)
     u = torch.rand(t.shape, device=device)
     t = lower + (upper - lower) * u  # [batch_size, nb_bins]
-    delta = torch.cat((t[:, 1:] - t[:, :-1], torch.tensor(
+    delta = torch.cat((t[:, 1:] - t[:, :-1], Tensor(
         [1e10], device=device).expand(ray_origins.shape[0], 1)), -1)
 
     # Compute the 3D points along each ray
@@ -145,35 +213,43 @@ def render_rays(nerf_model, ray_origins, ray_directions, hn=0, hf=0.5, nb_bins=1
     return c + 1 - weight_sum.unsqueeze(-1)
 
 
-def train(nerf_model, optimizer, dataset, device='cpu', hn=0, hf=1, nb_epochs=10,
-          nb_bins=192, batch_size=2 ** 14, max_steps=None):
-    # No DataLoader: its shuffling sampler builds a Python list of every ray index
-    # (~64M ints), which blew up host RAM. A randperm tensor is far cheaper.
-    n = dataset.shape[0]
-    step = 0
-    for _ in range(nb_epochs):
-        perm = torch.randperm(n)
-        total = (n + batch_size - 1) // batch_size
-        if max_steps is not None:
-            total = min(total, max_steps - step)
-        bar = tqdm(range(total))
+# dataset here is a tensor where each row is [origin xyz, direction xyz, true color xyz]
+def train(nerfModel: NGP, optimizer: torch.optim.Adam, dataset: Tensor, device='cpu', hn=0, hf=1, epochs=10, bins=192, batchSize=2**14, maxSteps=None):
+    # No DataLoader: its shuffling sampler builds a Python list of every ray index (~64M ints), which blows up RAM. A randperm tensor is far cheaper.
+    n: int = dataset.shape[0] # number of training rays
+    step: int = 0
+    for _ in range(epochs):
+        randomRays: Tensor = torch.randperm(n) # get a random combination of ray indices
+
+		# calculate the batch size
+        total: int = (n + batchSize - 1) // batchSize
+        if maxSteps is not None:
+            total = min(total, maxSteps - step)
+            
+        bar: tqdm = tqdm(range(total))
         for k in bar:
-            s = k * batch_size
-            batch = dataset[perm[s:s + batch_size]]
-            ray_origins = batch[:, :3].to(device)
-            ray_directions = batch[:, 3:6].to(device)
-            gt_px_values = batch[:, 6:].to(device)
-            pred_px_values = render_rays(nerf_model, ray_origins, ray_directions,
-                                         hn=hn, hf=hf, nb_bins=nb_bins)
-            loss = ((gt_px_values - pred_px_values) ** 2).mean()
+            s: int = k * batchSize # offset into randomRays
+            batch: Tensor = dataset[randomRays[s:s + batchSize]] # returns just those rays out of the dataset
+
+			# extract the ray origin, direction, and color from that
+            rayOrigins: Tensor = batch[:, :3].to(device)
+            rayDirections: Tensor = batch[:, 3:6].to(device)
+            groundTruthColor: Tensor = batch[:, 6:].to(device)
+
+			# render the ray and get the predicted values
+            predictedValues: Tensor = render_rays(nerfModel, rayOrigins, rayDirections, hn=hn, hf=hf, nb_bins=bins)
+
+			# measure loss, do gradient descent stuff
+            loss: Tensor = ((groundTruthColor - predictedValues) ** 2).mean()
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+            
             step += 1
             if k % 50 == 0:
                 bar.set_postfix(loss=f"{loss.item():.4f}")
-        if max_steps is not None and step >= max_steps:
-            break
+                
+        if maxSteps is not None and step >= maxSteps: break
 
 
 if __name__ == "__main__":
@@ -188,24 +264,24 @@ if __name__ == "__main__":
     print("start")
 
     # Only load the 2 GB training set if we're actually training
-    training_dataset = None
+    training_dataset: Tensor = Tensor()
     if not SKIP_TRAIN:
         training_dataset = torch.from_numpy(np.load('training_data_800x800.pkl', allow_pickle=True))
         print("training loaded", tuple(training_dataset.shape))
     # Test set stays on disk as a memmap
-    testing_dataset = np.load('testing_data_800x800.pkl', allow_pickle=True, mmap_mode='r')
+    testing_dataset: Tensor = np.load('testing_data_800x800.pkl', allow_pickle=True, mmap_mode='r')
     print("testing mapped", testing_dataset.shape)
 
     L = 16
     F = 2
-    T = 2 ** 19
-    N_min = 16
-    N_max = 2048
+    numRows: int = 2 ** 19
+    N_min: int = 16
+    N_max: int = 2048
     b = np.exp((np.log(N_max) - np.log(N_min)) / (L - 1))
-    Nl = [int(np.floor(N_min * b ** l)) for l in range(L)]
-    model = NGP(T, Nl, 4, device, 3)
-    model_optimizer = torch.optim.Adam(
-        [{"params": model.lookup_tables.parameters(), "lr": 1e-2, "betas": (0.9, 0.99), "eps": 1e-15, "weight_decay": 0.},
+    gridResolution = [int(np.floor(N_min * b ** l)) for l in range(L)]
+    model: NGP = NGP(numRows, gridResolution, 4, device, 3)
+    modelOptimizer: torch.optim.Adam = torch.optim.Adam(
+        [{"params": model.lookupTables.parameters(), "lr": 1e-2, "betas": (0.9, 0.99), "eps": 1e-15, "weight_decay": 0.},
          {"params": model.density_MLP.parameters(), "lr": 1e-2, "betas": (0.9, 0.99), "eps": 1e-15, "weight_decay": 10 ** -6},
          {"params": model.color_MLP.parameters(), "lr": 1e-2, "betas": (0.9, 0.99), "eps": 1e-15, "weight_decay": 10 ** -6}])
 
@@ -214,14 +290,13 @@ if __name__ == "__main__":
         model.load_state_dict(torch.load('ngp_weights.pt', map_location=device))
     else:
         print("starting training")
-        train(model, model_optimizer, training_dataset, nb_epochs=1, device=device,
-              hn=HN, hf=HF, nb_bins=NB_BINS, batch_size=BATCH_SIZE, max_steps=MAX_STEPS)
+        train(model, modelOptimizer, training_dataset, epochs=1, device=device, hn=HN, hf=HF, bins=NB_BINS, batchSize=BATCH_SIZE, maxSteps=MAX_STEPS)
         print("ending training")
         torch.save(model.state_dict(), 'ngp_weights.pt')
 
-    os.makedirs('novel_views', exist_ok=True)
-    for img_index in tqdm(range(TEST_IMAGES)):
-        test(model, device, HN, HF, testing_dataset, img_index,
-             chunk_size=TEST_CHUNK_ROWS, nb_bins=NB_BINS, H=H, W=W)
-        torch.cuda.empty_cache()   # release cached VRAM between images
+    # os.makedirs('novel_views', exist_ok=True)
+    # for img_index in tqdm(range(TEST_IMAGES)):
+    #     test(model, device, HN, HF, testing_dataset, img_index, chunk_size=TEST_CHUNK_ROWS, nb_bins=NB_BINS, H=H, W=W)
+    #     torch.cuda.empty_cache()   # release cached VRAM between images
+    test(model, device, HN, HF, testing_dataset, 30, chunk_size=TEST_CHUNK_ROWS, nb_bins=NB_BINS, H=H, W=W)
     print("done: see novel_views/")
