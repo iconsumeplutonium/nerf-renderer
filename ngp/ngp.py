@@ -176,7 +176,7 @@ def test(model: NGP, device: str, hn, hf, dataset, img_index, chunk_size=5, nb_b
     for i in range(int(np.ceil(H / chunk_size))):  # iterate over chunks
         ro = ray_origins[i * W * chunk_size: (i + 1) * W * chunk_size].to(device)
         rd = ray_directions[i * W * chunk_size: (i + 1) * W * chunk_size].to(device)
-        px_values.append(render_rays(model, ro, rd, hn=hn, hf=hf, nb_bins=nb_bins).cpu())
+        px_values.append(render_rays(model, ro, rd, near=hn, far=hf, bins=nb_bins).cpu())
     img = torch.cat(px_values).numpy().reshape(H, W, 3)
     img = (img.clip(0, 1) * 255.).astype(np.uint8)
     Image.fromarray(img).save(f'novel_views/full_img_{img_index}.png')
@@ -189,27 +189,50 @@ def compute_accumulated_transmittance(alphas):
                       accumulated_transmittance[:, :-1]), dim=-1)
 
 
-def render_rays(nerf_model, ray_origins, ray_directions, hn=0, hf=0.5, nb_bins=192):
-    device = ray_origins.device
-    t = torch.linspace(hn, hf, nb_bins, device=device).expand(ray_origins.shape[0], nb_bins)
-    # Perturb sampling along each ray.
-    mid = (t[:, :-1] + t[:, 1:]) / 2.
-    lower = torch.cat((t[:, :1], mid), -1)
-    upper = torch.cat((mid, t[:, -1:]), -1)
-    u = torch.rand(t.shape, device=device)
-    t = lower + (upper - lower) * u  # [batch_size, nb_bins]
-    delta = torch.cat((t[:, 1:] - t[:, :-1], Tensor(
-        [1e10], device=device).expand(ray_origins.shape[0], 1)), -1)
+def render_rays(nerfModel: NGP, rayOrigins: Tensor, rayDirections: Tensor, near, far, bins: int = 192):
+    # generate 192 sample points between the near and far planes
+    device = rayOrigins.device
+    t: Tensor = torch.linspace(near, far, bins, device=device).expand(rayOrigins.shape[0], bins)
+    
+    # some pytorch bullshit to get a list of intervals
+    mid: Tensor = (t[:, :-1] + t[:, 1:]) / 2.
+    lower: Tensor = torch.cat((t[:, :1], mid), -1)
+    upper: Tensor = torch.cat((mid, t[:, -1:]), -1)
+
+    # u is some random jitter within that interval
+    u: Tensor = torch.rand(t.shape, device=device)
+    
+    # pick a random sample within each interval
+    t = lower + (upper - lower) * u  
+
+    # subtracts each sample with the next sample, to get a tensor that represents distance from one sample to the next
+    delta = torch.cat((t[:, 1:] - t[:, :-1], torch.tensor([1e10], device=device).expand(rayOrigins.shape[0], 1)), -1)
 
     # Compute the 3D points along each ray
-    x = ray_origins.unsqueeze(1) + t.unsqueeze(2) * ray_directions.unsqueeze(1)
-    # Expand the ray_directions tensor to match the shape of x
-    ray_directions = ray_directions.expand(nb_bins, ray_directions.shape[0], 3).transpose(0, 1)
-    colors, sigma = nerf_model(x.reshape(-1, 3), ray_directions.reshape(-1, 3))
-    alpha = 1 - torch.exp(-sigma.reshape(x.shape[:-1]) * delta)  # [batch_size, nb_bins]
-    weights = compute_accumulated_transmittance(1 - alpha).unsqueeze(2) * alpha.unsqueeze(2)
-    c = (weights * colors.reshape(x.shape)).sum(dim=1)
-    weight_sum = weights.sum(-1).sum(-1)  # Regularization for white background
+    x: Tensor = rayOrigins.unsqueeze(1) + t.unsqueeze(2) * rayDirections.unsqueeze(1)
+
+    # some tensor reshaping bullshit idk
+    rayDirections = rayDirections.expand(bins, rayDirections.shape[0], 3).transpose(0, 1)
+
+    # builds a tensor of (B rays) by (N samples per ray) by 3. this gets flattened into (BxN, 3), ie a giant list of sample points
+    # then passes that into the NGP model to render it out and get the colors and density at each sample point
+    colors, sigma = nerfModel(x.reshape(-1, 3), rayDirections.reshape(-1, 3))
+
+    # calculate the opacity at each sample point
+    alpha: Tensor = 1 - torch.exp(-sigma.reshape(x.shape[:-1]) * delta)
+
+    # calculate the transmittence per sample point
+    weights: Tensor = compute_accumulated_transmittance(1 - alpha).unsqueeze(2) * alpha.unsqueeze(2)
+
+    # converts it back from (BxN, 3) into (B rays, N samples per ray, 3)
+    # multiplies predicted color at each point by the transmittence at each point, 
+    # then adds it up to get the final color per ray, so the final shape is (B, 3)
+    c: Tensor = (weights * colors.reshape(x.shape)).sum(dim=1)
+
+    # Add up the transmittences per point along the ray into one final transmittence per ray (shape is a 1d array of length num rays)
+    weight_sum = weights.sum(-1).sum(-1)
+
+    # the image background was white, so rays that miss or are transparent need to be mixed with white. 
     return c + 1 - weight_sum.unsqueeze(-1)
 
 
@@ -221,7 +244,7 @@ def train(nerfModel: NGP, optimizer: torch.optim.Adam, dataset: Tensor, device='
     for _ in range(epochs):
         randomRays: Tensor = torch.randperm(n) # get a random combination of ray indices
 
-		# calculate the batch size
+        # calculate the batch size
         total: int = (n + batchSize - 1) // batchSize
         if maxSteps is not None:
             total = min(total, maxSteps - step)
@@ -231,15 +254,15 @@ def train(nerfModel: NGP, optimizer: torch.optim.Adam, dataset: Tensor, device='
             s: int = k * batchSize # offset into randomRays
             batch: Tensor = dataset[randomRays[s:s + batchSize]] # returns just those rays out of the dataset
 
-			# extract the ray origin, direction, and color from that
+            # extract the ray origin, direction, and color from that
             rayOrigins: Tensor = batch[:, :3].to(device)
             rayDirections: Tensor = batch[:, 3:6].to(device)
             groundTruthColor: Tensor = batch[:, 6:].to(device)
 
-			# render the ray and get the predicted values
-            predictedValues: Tensor = render_rays(nerfModel, rayOrigins, rayDirections, hn=hn, hf=hf, nb_bins=bins)
+            # render the ray and get the predicted values
+            predictedValues: Tensor = render_rays(nerfModel, rayOrigins, rayDirections, near=hn, far=hf, bins=bins)
 
-			# measure loss, do gradient descent stuff
+            # measure loss, do gradient descent stuff
             loss: Tensor = ((groundTruthColor - predictedValues) ** 2).mean()
             optimizer.zero_grad()
             loss.backward()
