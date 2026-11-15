@@ -65,7 +65,7 @@ class NGP(torch.nn.Module):
 
     # poor man's spherical harmonics
     # the color of a point depends on the direction you view it from. in gaussian splats/instant ngp, 
-    # you use spherical harmonics. here, we use a simpler version. (L = 4)
+    # you use spherical harmonics. here, we use a simpler version. (numFrequencies = 4)
     # the positional encoding becomes [x, sin(x), cos(x), sin(2x), cos(2x), sin(4x), cos(4x), sin(8x), cos(8x)]
     def positional_encoding(self, x: Tensor) -> Tensor:
         out: list[Tensor] = [x]
