@@ -57,6 +57,11 @@ bool float_eq(float a, float b) {
 }
 } // namespace
 
+const int WIDTH = 800;
+const int HEIGHT = 800;
+const int NUM_ROWS = WIDTH * HEIGHT;
+const int FLOATS_PER_ROW = 9;
+
 int main(int argc, char** argv) {
     parse_args(argc, argv);
     std::srand(50);
@@ -74,10 +79,10 @@ int main(int argc, char** argv) {
 	// each camera pose is 800 by 800, so 640000 rows for each ray
 	// each row is 9 values (3 camera pos, 3 ray dir, 3 rgb)
 	// so each new camera position is this
-	testingData.seekg((640000 * 9 * testPositionToRead) * sizeof(float));
+	testingData.seekg((NUM_ROWS * FLOATS_PER_ROW * testPositionToRead) * sizeof(float));
 	std::vector<float> poses;
-	poses.resize(640000 * 9);
-	testingData.read(reinterpret_cast<char*>(poses.data()), sizeof(float) * 640000 * 9);
+	poses.resize(NUM_ROWS * FLOATS_PER_ROW);
+	testingData.read(reinterpret_cast<char*>(poses.data()), sizeof(float) * NUM_ROWS * FLOATS_PER_ROW);
 	std::cout << poses.size() << std::endl;
 
 
