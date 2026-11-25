@@ -57,6 +57,12 @@ bool float_eq(float a, float b) {
 }
 } // namespace
 
+void readFromFile(std::string fileName, char* destination, std::streamsize amountToRead) {
+	std::ifstream file(fileName, std::ios::binary);
+	file.read(destination, amountToRead);
+	file.close();
+}
+
 const int WIDTH = 800;
 const int HEIGHT = 800;
 const int NUM_ROWS = WIDTH * HEIGHT;
@@ -73,9 +79,8 @@ int main(int argc, char** argv) {
 		return 0;
 	}
 
-	std::cout << "running" << std::endl;
 	int testPositionToRead = 0;
-
+	
 	// each camera pose is 800 by 800, so 640000 rows for each ray
 	// each row is 9 values (3 camera pos, 3 ray dir, 3 rgb)
 	// so each new camera position is this
@@ -83,13 +88,83 @@ int main(int argc, char** argv) {
 	std::vector<float> poses;
 	poses.resize(NUM_ROWS * FLOATS_PER_ROW);
 	testingData.read(reinterpret_cast<char*>(poses.data()), sizeof(float) * NUM_ROWS * FLOATS_PER_ROW);
+	testingData.close();
 	std::cout << poses.size() << std::endl;
+	
+	// lookup_tables.0 (524288, 2)
+	// lookup_tables.1 (524288, 2)
+	// lookup_tables.10 (524288, 2)
+	// lookup_tables.11 (524288, 2)
+	// lookup_tables.12 (524288, 2)
+	// lookup_tables.13 (524288, 2)
+	// lookup_tables.14 (524288, 2)
+	// lookup_tables.15 (524288, 2)
+	// lookup_tables.2 (524288, 2)
+	// lookup_tables.3 (524288, 2)
+	// lookup_tables.4 (524288, 2)
+	// lookup_tables.5 (524288, 2)
+	// lookup_tables.6 (524288, 2)
+	// lookup_tables.7 (524288, 2)
+	// lookup_tables.8 (524288, 2)
+	// lookup_tables.9 (524288, 2)
+	// density_MLP.0.weight (64, 32)
+	// density_MLP.0.bias (64,)
+	// density_MLP.2.weight (16, 64)
+	// density_MLP.2.bias (16,)
+	// color_MLP.0.weight (64, 43)
+	// color_MLP.0.bias (64,)
+	// color_MLP.2.weight (64, 64)
+	// color_MLP.2.bias (64,)
+	// color_MLP.4.weight (3, 64)
+	// color_MLP.4.bias (3,)
+	
+	std::vector<std::vector<float>> colorMLPWeights(3);
+	colorMLPWeights[0].resize(64 * 43);
+	colorMLPWeights[1].resize(64 * 64);
+	colorMLPWeights[2].resize(3 * 64);
+	readFromFile("./weights/color_MLP.0.weight", reinterpret_cast<char*>(colorMLPWeights[0].data()), (64 * 43) * sizeof(float));
+	readFromFile("./weights/color_MLP.2.weight", reinterpret_cast<char*>(colorMLPWeights[1].data()), (64 * 64) * sizeof(float));
+	readFromFile("./weights/color_MLP.4.weight", reinterpret_cast<char*>(colorMLPWeights[2].data()), ( 3 * 64) * sizeof(float));
+	
+	std::vector<std::vector<float>> colorMLPBias(3);
+	colorMLPBias[0].resize(64);
+	colorMLPBias[1].resize(64);
+	colorMLPBias[2].resize(3 );
+	readFromFile("./weights/color_MLP.0.bias", reinterpret_cast<char*>(colorMLPBias[0].data()), (64) * sizeof(float));
+	readFromFile("./weights/color_MLP.2.bias", reinterpret_cast<char*>(colorMLPBias[1].data()), (64) * sizeof(float));
+	readFromFile("./weights/color_MLP.4.bias", reinterpret_cast<char*>(colorMLPBias[2].data()), ( 3) * sizeof(float));
+	
+	
+	std::vector<std::vector<float>> densityMLPWeights(2);
+	densityMLPWeights[0].resize(64 * 32);
+	densityMLPWeights[1].resize(16 * 64);
+	readFromFile("./weights/density_MLP.0.weight", reinterpret_cast<char*>(densityMLPWeights[0].data()), (64 * 32) * sizeof(float));
+	readFromFile("./weights/density_MLP.2.weight", reinterpret_cast<char*>(densityMLPWeights[1].data()), (16 * 64) * sizeof(float));
+	
+	std::vector<std::vector<float>> densityMLPBias(3);
+	densityMLPBias[0].resize(64);
+	densityMLPBias[1].resize(16);
+	readFromFile("./weights/density_MLP.0.bias", reinterpret_cast<char*>(densityMLPBias[0].data()), (64) * sizeof(float));
+	readFromFile("./weights/density_MLP.2.bias", reinterpret_cast<char*>(densityMLPBias[1].data()), (16) * sizeof(float));
+	
+	std::vector<std::vector<float>> lookupTables(16);
+	for (int i = 0; i < 16; i++) {
+		lookupTables[i].resize(524288 * 2);
+		std::string fileName = "./weights/lookup_tables." + std::to_string(i) + ".bin";
+		readFromFile(fileName, reinterpret_cast<char*>(lookupTables[i].data()), (524288 * 2) * sizeof(float));
+
+		std::cout << i << ": " << lookupTables[i].size() << std::endl;
+	}
 
 
+	std::cout << "running" << std::endl;
+	// std::cout << densityMLPBias[0].size() << std::endl;
+	// std::cout << densityMLPBias[1].size() << std::endl;
+	
+	
 	std::cout << "\nfinished" << std::endl;
 
 
-	testingData.close();
 	return 0;
 
 
