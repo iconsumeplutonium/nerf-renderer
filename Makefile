@@ -1,7 +1,7 @@
 # this makefile was adapated from vortex/build/tests/regression/vecadd
 # normally this variable points to ../../.., but now, vortex lives
 # in ../vortex, so this gets the ahbsolute path to that forlder
-VORTEX_HOME ?= $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/../vortex)
+VORTEX_HOME := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/../vortex)
 
 # ROOT_DIR is overwritten in common.mk, so this forces this definition to take precendence
 override ROOT_DIR := $(VORTEX_HOME)/build

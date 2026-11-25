@@ -22,6 +22,8 @@
 #include <unistd.h>
 #include <vector>
 
+#include <fstream>
+
 #define CHECK(expr) do { \
     vx_result_t _r = (expr); \
     if (_r != VX_SUCCESS) { \
@@ -59,10 +61,36 @@ int main(int argc, char** argv) {
     parse_args(argc, argv);
     std::srand(50);
 
+	// testing area for reading the file and stuff
+	std::ifstream testingData("../igp/testing_data.bin", std::ios::binary);
+	if (!testingData) {
+		std::cout << "file doesnt exist" << std::endl;
+		return 0;
+	}
+
+	std::cout << "running" << std::endl;
+	int testPositionToRead = 0;
+
+	// each camera pose is 800 by 800, so 640000 rows for each ray
+	// each row is 9 values (3 camera pos, 3 ray dir, 3 rgb)
+	// so each new camera position is this
+	testingData.seekg((640000 * 9 * testPositionToRead) * sizeof(float));
+	std::vector<float> poses;
+	poses.resize(640000 * 9);
+	testingData.read(reinterpret_cast<char*>(poses.data()), sizeof(float) * 640000 * 9);
+	std::cout << poses.size() << std::endl;
+
+
+	std::cout << "\nfinished" << std::endl;
+
+
+	testingData.close();
+	return 0;
+
+
     const uint32_t num_points = size;
     const uint64_t buf_size   = num_points * sizeof(TYPE);
-    std::cout << "vecadd vortex2: n=" << num_points
-              << " buf=" << buf_size << "B" << std::endl;
+    std::cout << "vecadd vortex2: n=" << num_points << " buf=" << buf_size << "B" << std::endl;
 
     vx_device_h dev = nullptr;
     CHECK(vx_device_open(0, &dev));
