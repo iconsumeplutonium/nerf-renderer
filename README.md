@@ -23,7 +23,7 @@ Then:
 
 Once the NeRF is trained, it will produce a file called `ngp_weights.pt`. 
 
-Next, you need to run `convert.py` to convert the testing dataset into a C++-friendly file format. 
+Next, you need to run `convert.py` to convert the testing dataset and the model weights into a C++-friendly file format. 
 
 ### vortex itself
 

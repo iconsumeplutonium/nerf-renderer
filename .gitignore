@@ -6,3 +6,4 @@ nerf
 .depend
 config.stamp*
 *.log
+*.bin
