@@ -175,12 +175,12 @@ int main(int argc, char** argv) {
 	// }
 
 
-	std::cout << "running" << std::endl;
+	// std::cout << "running" << std::endl;
 	// std::cout << densityMLPBias[0].size() << std::endl;
 	// std::cout << densityMLPBias[1].size() << std::endl;
 	
 	
-	std::cout << "\nfinished" << std::endl;
+	// std::cout << "\nfinished" << std::endl;
 
 	const uint32_t numRays = rays.size() / 3;
 	const uint64_t rayBufferSize = rays.size() * sizeof(float);
@@ -197,12 +197,7 @@ int main(int argc, char** argv) {
     vx_queue_h q = nullptr;
     CHECK(vx_queue_create(device, &qInfo, &q));
 
-    // vx_buffer_h src0_buf = nullptr;
-	// vx_buffer_h src1_buf = nullptr;
-	// vx_buffer_h dst_buf = nullptr;
-    // CHECK(vx_buffer_create(device, buf_size, VX_MEM_READ,  &src0_buf));
-    // CHECK(vx_buffer_create(device, buf_size, VX_MEM_READ,  &src1_buf));
-    // CHECK(vx_buffer_create(device, buf_size, VX_MEM_WRITE, &dst_buf));
+	// set up all the buffers and shit
 	vx_buffer_h rayBuffer = nullptr;
 	CHECK(vx_buffer_create(device, rayBufferSize, VX_MEM_READ_WRITE, &rayBuffer));
 
@@ -211,25 +206,11 @@ int main(int argc, char** argv) {
     CHECK(vx_module_load_file(device, kernel_file, &module_));
     CHECK(vx_module_get_kernel(module_, "main", &kernel));
 
-    // kernel_arg_t kernel_arg{};
-    // kernel_arg.num_points = num_points;
-    // CHECK(vx_buffer_address(src0_buf, &kernel_arg.src0_addr));
-    // CHECK(vx_buffer_address(src1_buf, &kernel_arg.src1_addr));
-    // CHECK(vx_buffer_address(dst_buf,  &kernel_arg.dst_addr));
-	kernel_arg_t kernelArgs { };
+	kernel_arg_t kernelArgs {};
 	kernelArgs.numRays = numRays;
+	std::copy(camOrigin.begin(), camOrigin.end(), kernelArgs.camOrigin);
 	CHECK(vx_buffer_address(rayBuffer, &kernelArgs.rayBuffer));
 
-    // std::vector<TYPE> h_src0(num_points), h_src1(num_points), h_dst(num_points);
-    // for (uint32_t i = 0; i < num_points; ++i) {
-    //     h_src0[i] = static_cast<TYPE>(std::rand()) / RAND_MAX;
-    //     h_src1[i] = static_cast<TYPE>(std::rand()) / RAND_MAX;
-    // }
-
-    // ----- Async chain: 2 writes → launch → read → 1 wait -----
-    // The kernel-args block is passed as a host blob — no args device buffer needed.
-    // CHECK(vx_enqueue_write(q, src0_buf, 0, h_src0.data(), buf_size, 0,nullptr,nullptr));
-    // CHECK(vx_enqueue_write(q, src1_buf, 0, h_src1.data(), buf_size, 0,nullptr,nullptr));
 	CHECK(vx_enqueue_write(q, rayBuffer, 0, rays.data(), rayBufferSize, 0, nullptr, nullptr));
 
     uint32_t grid[1], block[1];
@@ -254,21 +235,11 @@ int main(int argc, char** argv) {
 
 	std::cout << "kernel finished, checking errors" << std::endl;
 	long errors = 0;
-	for (int i = 0; i < rayDst.size(); i++) {
-		if (rayDst[i] != rays[i] * -1.0f) errors++;
+	for (int i = 0; i < rayDst.size(); i += 3) {
+		if (rayDst[i] != camOrigin[i % 3]) errors++;
 		// std::cout << rays[i] << std::endl;;
 	}
 	std::cout << "errors: " << errors << std::endl;
-
-    // int errors = 0;
-    // for (uint32_t i = 0; i < num_points; ++i) {
-    //     TYPE ref = h_src0[i] + h_src1[i];
-    //     if (!float_eq(h_dst[i], ref)) {
-    //         if (errors < 16)
-    //             std::printf("*** [%u] expected=%f actual=%f\n", i, ref, h_dst[i]);
-    //         ++errors;
-    //     }
-    // }
 
     vx_event_release(read_ev);
     vx_event_release(launch_ev);

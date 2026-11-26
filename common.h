@@ -5,16 +5,13 @@
 #define TYPE float
 #endif
 
-// typedef struct {
-//   uint32_t num_points;
-//   uint64_t src0_addr;
-//   uint64_t src1_addr;
-//   uint64_t dst_addr;  
-// } kernel_arg_t;
-
 typedef struct {
 	uint32_t numRays;
 	uint64_t rayBuffer;
+	float camOrigin[3];
+
+	uint64_t colorLayer0WeightsAddr;
+	uint64_t colorLayer0BiasAddr;
 } kernel_arg_t;
 
 #endif
