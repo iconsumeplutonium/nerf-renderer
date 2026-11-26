@@ -10,7 +10,7 @@ During training, each sample point is chosen randomly within each interval. For 
 
 ## Step 2: skip points outside the bounding box
 
-The scene lives inside a cube of size 3x3x3 centered on the origin. Divide the point by 3, and the cube becomes -0.5 to 0.5 on every axis. If any coordinate is outside that range, ignore it. For points inside, add 0.5 so the coordinates run 0 to 1, which is what the hash grid expects.
+The scene lives inside a cube of size 3x3x3 centered on the origin. Divide the point by 3, to make the cube -0.5 to 0.5 on every axis. If any coordinate is outside that range, those get density 0, color 0. For points inside, add 0.5 so the coordinates run 0 to 1, which is what the hash grid expects.
 
 ## Step 3: look up features from the hash grid
 
@@ -40,7 +40,7 @@ The camera origin is never an input to either MLP. It is only used to place the 
 
 ## Step 6: combine the samples into one pixel
 
-Now every sample on the ray has a color and a density. The ray's color is built front to back.
+Now every sample on the ray has a color and a density. The sample points outside the box scene were at density 0 and color 0, while the ones inside the box got their predicted density and color from the MLP. The ray's color is built front to back.
 
 * Opacity for each sample is calculated as `alpha = 1 - exp(-density * distance between samples)`.
 * The transmittance for each sample is calculated by accumulating `(1 - alpha)` repeatedly. So the transmittance of the first point is 1, the second point is 1 * (1-alpha_2), then the third point is 1 * (1-alpha_2) * (1-alpha_3), etc. 

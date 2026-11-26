@@ -136,13 +136,13 @@ int main(int argc, char** argv) {
 	// color_MLP.4.weight (3, 64)
 	// color_MLP.4.bias (3,)
 	
-	// std::vector<std::vector<float>> colorMLPWeights(3);
-	// colorMLPWeights[0].resize(64 * 43);
-	// colorMLPWeights[1].resize(64 * 64);
-	// colorMLPWeights[2].resize(3 * 64);
-	// readFromFile("./ngp/weights/color_MLP.0.weight.bin", reinterpret_cast<char*>(colorMLPWeights[0].data()), (64 * 43) * sizeof(float));
-	// readFromFile("./ngp/weights/color_MLP.2.weight.bin", reinterpret_cast<char*>(colorMLPWeights[1].data()), (64 * 64) * sizeof(float));
-	// readFromFile("./ngp/weights/color_MLP.4.weight.bin", reinterpret_cast<char*>(colorMLPWeights[2].data()), ( 3 * 64) * sizeof(float));
+	std::vector<std::vector<float>> colorMLPWeights(3);
+	colorMLPWeights[0].resize(64 * 43);
+	colorMLPWeights[1].resize(64 * 64);
+	colorMLPWeights[2].resize(3 * 64);
+	readFromFile("./ngp/weights/color_MLP.0.weight.bin", reinterpret_cast<char*>(colorMLPWeights[0].data()), (64 * 43) * sizeof(float));
+	readFromFile("./ngp/weights/color_MLP.2.weight.bin", reinterpret_cast<char*>(colorMLPWeights[1].data()), (64 * 64) * sizeof(float));
+	readFromFile("./ngp/weights/color_MLP.4.weight.bin", reinterpret_cast<char*>(colorMLPWeights[2].data()), ( 3 * 64) * sizeof(float));
 	
 	// std::vector<std::vector<float>> colorMLPBias(3);
 	// colorMLPBias[0].resize(64);
@@ -165,15 +165,19 @@ int main(int argc, char** argv) {
 	// readFromFile("./ngp/weights/density_MLP.0.bias.bin", reinterpret_cast<char*>(densityMLPBias[0].data()), (64) * sizeof(float));
 	// readFromFile("./ngp/weights/density_MLP.2.bias.bin", reinterpret_cast<char*>(densityMLPBias[1].data()), (16) * sizeof(float));
 	
-	// std::vector<std::vector<float>> lookupTables(16);
-	// for (int i = 0; i < (int) lookupTables.size(); i++) {
-	// 	lookupTables[i].resize(524288 * 2);
-	// 	std::string fileName = "./ngp/weights/lookup_tables." + std::to_string(i) + ".bin";
-	// 	readFromFile(fileName, reinterpret_cast<char*>(lookupTables[i].data()), (524288 * 2) * sizeof(float));
+	// combine all 16 lookup tables into one big ass vector for simplicity
+	std::vector<float> lookupTables;
+	const int HASH_TABLE_SIZE = 524288;
+	const int FEATURES_PER_LOOKUP = 2;
 
-	// 	std::cout << i << ": " << lookupTables[i].size() << std::endl;
-	// }
+	const int VALUES_PER_TABLE = HASH_TABLE_SIZE * FEATURES_PER_LOOKUP;
+	lookupTables.resize(VALUES_PER_TABLE * 16);
+	for (int i = 0; i < (int) 16; i++) {
+		std::string fileName = "./ngp/weights/lookup_tables." + std::to_string(i) + ".bin";
+		readFromFile(fileName, reinterpret_cast<char*>(lookupTables.data() + i * VALUES_PER_TABLE), VALUES_PER_TABLE * sizeof(float));
 
+	}
+	std::cout << lookupTables.size() << std::endl;
 
 	// std::cout << "running" << std::endl;
 	// std::cout << densityMLPBias[0].size() << std::endl;
@@ -201,6 +205,15 @@ int main(int argc, char** argv) {
 	vx_buffer_h rayBuffer = nullptr;
 	CHECK(vx_buffer_create(device, rayBufferSize, VX_MEM_READ_WRITE, &rayBuffer));
 
+	vx_buffer_h colorMLPWeightBuffers[3] = {nullptr};
+	for (int i = 0; i < colorMLPWeights.size(); i++) {
+		CHECK(vx_buffer_create(device, colorMLPWeights[i].size() * sizeof(float), VX_MEM_READ, &colorMLPWeightBuffers[i]));
+	}
+
+	vx_buffer_h lookupTableBuffer = nullptr;
+	CHECK(vx_buffer_create(device, lookupTables.size() * sizeof(float), VX_MEM_READ, &lookupTableBuffer));
+	
+
     vx_module_h module_ = nullptr;
     vx_kernel_h kernel = nullptr;
     CHECK(vx_module_load_file(device, kernel_file, &module_));
@@ -210,14 +223,18 @@ int main(int argc, char** argv) {
 	kernelArgs.numRays = numRays;
 	std::copy(camOrigin.begin(), camOrigin.end(), kernelArgs.camOrigin);
 	CHECK(vx_buffer_address(rayBuffer, &kernelArgs.rayBuffer));
+	for (int i = 0; i < colorMLPWeights.size(); i++) {
+		CHECK(vx_buffer_address(colorMLPWeightBuffers[i], &kernelArgs.colorLayerWeightsAddr[i]));
+	}
+	CHECK(vx_buffer_address(lookupTableBuffer, &kernelArgs.lookupTable));
 
 	CHECK(vx_enqueue_write(q, rayBuffer, 0, rays.data(), rayBufferSize, 0, nullptr, nullptr));
 
     uint32_t grid[1], block[1];
     CHECK(vx_device_max_occupancy_grid(device, 1, &numRays, grid, block));
+	std::cout << grid[0] << ", " << block[0] << std::endl;
 
-    vx_launch_info_t launchInfo {
-	};
+    vx_launch_info_t launchInfo {};
 	launchInfo.struct_size = sizeof(launchInfo);
 	launchInfo.kernel      = kernel;
 	launchInfo.args_host   = &kernelArgs;

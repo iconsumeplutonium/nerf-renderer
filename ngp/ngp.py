@@ -216,6 +216,7 @@ def render_rays(nerfModel: NGP, rayOrigins: Tensor, rayDirections: Tensor, near,
 
     # builds a tensor of (B rays) by (N samples per ray) by 3. this gets flattened into (BxN, 3), ie a giant list of sample points
     # then passes that into the NGP model to render it out and get the colors and density at each sample point
+    # pytorch bullshit: nerfModel is an NGP object, but if you call it like a function, it treats like a call to .forward()
     colors, sigma = nerfModel(x.reshape(-1, 3), rayDirections.reshape(-1, 3))
 
     # calculate the opacity at each sample point
