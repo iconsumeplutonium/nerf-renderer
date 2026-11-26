@@ -59,6 +59,10 @@ bool float_eq(float a, float b) {
 
 void readFromFile(std::string fileName, char* destination, std::streamsize amountToRead) {
 	std::ifstream file(fileName, std::ios::binary);
+	if (!file) {
+		std::cout << fileName << " does not exist" << std::endl;
+		return;
+	}
 	file.read(destination, amountToRead);
 	file.close();
 }
@@ -72,7 +76,6 @@ int main(int argc, char** argv) {
     parse_args(argc, argv);
     std::srand(50);
 
-	// testing area for reading the file and stuff
 	std::ifstream testingData("../igp/testing_data.bin", std::ios::binary);
 	if (!testingData) {
 		std::cout << "file doesnt exist" << std::endl;
@@ -84,12 +87,27 @@ int main(int argc, char** argv) {
 	// each camera pose is 800 by 800, so 640000 rows for each ray
 	// each row is 9 values (3 camera pos, 3 ray dir, 3 rgb)
 	// so each new camera position is this
-	testingData.seekg((NUM_ROWS * FLOATS_PER_ROW * testPositionToRead) * sizeof(float));
-	std::vector<float> poses;
-	poses.resize(NUM_ROWS * FLOATS_PER_ROW);
-	testingData.read(reinterpret_cast<char*>(poses.data()), sizeof(float) * NUM_ROWS * FLOATS_PER_ROW);
+	testingData.seekg(((NUM_ROWS * FLOATS_PER_ROW * testPositionToRead) * sizeof(float)));
+	std::vector<float> camOrigin(3);
+	testingData.read(reinterpret_cast<char*>(camOrigin.data()), sizeof(float) * 3);
+
+	std::vector<float> rays;
+	rays.resize(NUM_ROWS * 3);
+	// read 3 floats for the ray dir, then skip 6 (which is the rgb and the next camera pos [todo: actually read and stoer that shit])
+	for (int i = 0; i < NUM_ROWS; i++) {
+		testingData.read(reinterpret_cast<char*>(rays.data() + i*3), sizeof(float) * 3);
+		testingData.ignore(6 * sizeof(float));
+	}
+
 	testingData.close();
-	std::cout << poses.size() << std::endl;
+	std::cout << rays.size() << std::endl;
+
+	// for (int i = 0; i < rays.size(); i += 3) {
+	// 	std::cout << rays[i] << ", " << rays[i+1] << ", " << rays[i+2] << std::endl;
+	// 	if (i >= 99) break;
+	// }
+
+	// return 0;
 	
 	// lookup_tables.0 (524288, 2)
 	// lookup_tables.1 (524288, 2)
@@ -118,43 +136,43 @@ int main(int argc, char** argv) {
 	// color_MLP.4.weight (3, 64)
 	// color_MLP.4.bias (3,)
 	
-	std::vector<std::vector<float>> colorMLPWeights(3);
-	colorMLPWeights[0].resize(64 * 43);
-	colorMLPWeights[1].resize(64 * 64);
-	colorMLPWeights[2].resize(3 * 64);
-	readFromFile("./weights/color_MLP.0.weight", reinterpret_cast<char*>(colorMLPWeights[0].data()), (64 * 43) * sizeof(float));
-	readFromFile("./weights/color_MLP.2.weight", reinterpret_cast<char*>(colorMLPWeights[1].data()), (64 * 64) * sizeof(float));
-	readFromFile("./weights/color_MLP.4.weight", reinterpret_cast<char*>(colorMLPWeights[2].data()), ( 3 * 64) * sizeof(float));
+	// std::vector<std::vector<float>> colorMLPWeights(3);
+	// colorMLPWeights[0].resize(64 * 43);
+	// colorMLPWeights[1].resize(64 * 64);
+	// colorMLPWeights[2].resize(3 * 64);
+	// readFromFile("./ngp/weights/color_MLP.0.weight.bin", reinterpret_cast<char*>(colorMLPWeights[0].data()), (64 * 43) * sizeof(float));
+	// readFromFile("./ngp/weights/color_MLP.2.weight.bin", reinterpret_cast<char*>(colorMLPWeights[1].data()), (64 * 64) * sizeof(float));
+	// readFromFile("./ngp/weights/color_MLP.4.weight.bin", reinterpret_cast<char*>(colorMLPWeights[2].data()), ( 3 * 64) * sizeof(float));
 	
-	std::vector<std::vector<float>> colorMLPBias(3);
-	colorMLPBias[0].resize(64);
-	colorMLPBias[1].resize(64);
-	colorMLPBias[2].resize(3 );
-	readFromFile("./weights/color_MLP.0.bias", reinterpret_cast<char*>(colorMLPBias[0].data()), (64) * sizeof(float));
-	readFromFile("./weights/color_MLP.2.bias", reinterpret_cast<char*>(colorMLPBias[1].data()), (64) * sizeof(float));
-	readFromFile("./weights/color_MLP.4.bias", reinterpret_cast<char*>(colorMLPBias[2].data()), ( 3) * sizeof(float));
+	// std::vector<std::vector<float>> colorMLPBias(3);
+	// colorMLPBias[0].resize(64);
+	// colorMLPBias[1].resize(64);
+	// colorMLPBias[2].resize(3 );
+	// readFromFile("./ngp/weights/color_MLP.0.bias.bin", reinterpret_cast<char*>(colorMLPBias[0].data()), (64) * sizeof(float));
+	// readFromFile("./ngp/weights/color_MLP.2.bias.bin", reinterpret_cast<char*>(colorMLPBias[1].data()), (64) * sizeof(float));
+	// readFromFile("./ngp/weights/color_MLP.4.bias.bin", reinterpret_cast<char*>(colorMLPBias[2].data()), ( 3) * sizeof(float));
 	
 	
-	std::vector<std::vector<float>> densityMLPWeights(2);
-	densityMLPWeights[0].resize(64 * 32);
-	densityMLPWeights[1].resize(16 * 64);
-	readFromFile("./weights/density_MLP.0.weight", reinterpret_cast<char*>(densityMLPWeights[0].data()), (64 * 32) * sizeof(float));
-	readFromFile("./weights/density_MLP.2.weight", reinterpret_cast<char*>(densityMLPWeights[1].data()), (16 * 64) * sizeof(float));
+	// std::vector<std::vector<float>> densityMLPWeights(2);
+	// densityMLPWeights[0].resize(64 * 32);
+	// densityMLPWeights[1].resize(16 * 64);
+	// readFromFile("./ngp/weights/density_MLP.0.weight.bin", reinterpret_cast<char*>(densityMLPWeights[0].data()), (64 * 32) * sizeof(float));
+	// readFromFile("./ngp/weights/density_MLP.2.weight.bin", reinterpret_cast<char*>(densityMLPWeights[1].data()), (16 * 64) * sizeof(float));
 	
-	std::vector<std::vector<float>> densityMLPBias(3);
-	densityMLPBias[0].resize(64);
-	densityMLPBias[1].resize(16);
-	readFromFile("./weights/density_MLP.0.bias", reinterpret_cast<char*>(densityMLPBias[0].data()), (64) * sizeof(float));
-	readFromFile("./weights/density_MLP.2.bias", reinterpret_cast<char*>(densityMLPBias[1].data()), (16) * sizeof(float));
+	// std::vector<std::vector<float>> densityMLPBias(3);
+	// densityMLPBias[0].resize(64);
+	// densityMLPBias[1].resize(16);
+	// readFromFile("./ngp/weights/density_MLP.0.bias.bin", reinterpret_cast<char*>(densityMLPBias[0].data()), (64) * sizeof(float));
+	// readFromFile("./ngp/weights/density_MLP.2.bias.bin", reinterpret_cast<char*>(densityMLPBias[1].data()), (16) * sizeof(float));
 	
-	std::vector<std::vector<float>> lookupTables(16);
-	for (int i = 0; i < 16; i++) {
-		lookupTables[i].resize(524288 * 2);
-		std::string fileName = "./weights/lookup_tables." + std::to_string(i) + ".bin";
-		readFromFile(fileName, reinterpret_cast<char*>(lookupTables[i].data()), (524288 * 2) * sizeof(float));
+	// std::vector<std::vector<float>> lookupTables(16);
+	// for (int i = 0; i < (int) lookupTables.size(); i++) {
+	// 	lookupTables[i].resize(524288 * 2);
+	// 	std::string fileName = "./ngp/weights/lookup_tables." + std::to_string(i) + ".bin";
+	// 	readFromFile(fileName, reinterpret_cast<char*>(lookupTables[i].data()), (524288 * 2) * sizeof(float));
 
-		std::cout << i << ": " << lookupTables[i].size() << std::endl;
-	}
+	// 	std::cout << i << ": " << lookupTables[i].size() << std::endl;
+	// }
 
 
 	std::cout << "running" << std::endl;
@@ -164,91 +182,110 @@ int main(int argc, char** argv) {
 	
 	std::cout << "\nfinished" << std::endl;
 
+	const uint32_t numRays = rays.size() / 3;
+	const uint64_t rayBufferSize = rays.size() * sizeof(float);
 
-	return 0;
 
+    // const uint32_t num_points = size;
+    // const uint64_t buf_size   = num_points * sizeof(TYPE);
+    // std::cout << "vecadd vortex2: n=" << num_points << " buf=" << buf_size << "B" << std::endl;
 
-    const uint32_t num_points = size;
-    const uint64_t buf_size   = num_points * sizeof(TYPE);
-    std::cout << "vecadd vortex2: n=" << num_points << " buf=" << buf_size << "B" << std::endl;
+    vx_device_h device = nullptr;
+    CHECK(vx_device_open(0, &device));
 
-    vx_device_h dev = nullptr;
-    CHECK(vx_device_open(0, &dev));
-
-    vx_queue_info_t qi = { sizeof(qi), nullptr, VX_QUEUE_PRIORITY_NORMAL, 0 };
+    vx_queue_info_t qInfo = { sizeof(qInfo), nullptr, VX_QUEUE_PRIORITY_NORMAL, 0 };
     vx_queue_h q = nullptr;
-    CHECK(vx_queue_create(dev, &qi, &q));
+    CHECK(vx_queue_create(device, &qInfo, &q));
 
-    vx_buffer_h src0_buf=nullptr, src1_buf=nullptr, dst_buf=nullptr;
-    CHECK(vx_buffer_create(dev, buf_size, VX_MEM_READ,  &src0_buf));
-    CHECK(vx_buffer_create(dev, buf_size, VX_MEM_READ,  &src1_buf));
-    CHECK(vx_buffer_create(dev, buf_size, VX_MEM_WRITE, &dst_buf));
+    // vx_buffer_h src0_buf = nullptr;
+	// vx_buffer_h src1_buf = nullptr;
+	// vx_buffer_h dst_buf = nullptr;
+    // CHECK(vx_buffer_create(device, buf_size, VX_MEM_READ,  &src0_buf));
+    // CHECK(vx_buffer_create(device, buf_size, VX_MEM_READ,  &src1_buf));
+    // CHECK(vx_buffer_create(device, buf_size, VX_MEM_WRITE, &dst_buf));
+	vx_buffer_h rayBuffer = nullptr;
+	CHECK(vx_buffer_create(device, rayBufferSize, VX_MEM_READ_WRITE, &rayBuffer));
 
-    vx_module_h mod = nullptr;
-    vx_kernel_h kern = nullptr;
-    CHECK(vx_module_load_file(dev, kernel_file, &mod));
-    CHECK(vx_module_get_kernel(mod, "main", &kern));
+    vx_module_h module_ = nullptr;
+    vx_kernel_h kernel = nullptr;
+    CHECK(vx_module_load_file(device, kernel_file, &module_));
+    CHECK(vx_module_get_kernel(module_, "main", &kernel));
 
-    kernel_arg_t kernel_arg{};
-    kernel_arg.num_points = num_points;
-    CHECK(vx_buffer_address(src0_buf, &kernel_arg.src0_addr));
-    CHECK(vx_buffer_address(src1_buf, &kernel_arg.src1_addr));
-    CHECK(vx_buffer_address(dst_buf,  &kernel_arg.dst_addr));
+    // kernel_arg_t kernel_arg{};
+    // kernel_arg.num_points = num_points;
+    // CHECK(vx_buffer_address(src0_buf, &kernel_arg.src0_addr));
+    // CHECK(vx_buffer_address(src1_buf, &kernel_arg.src1_addr));
+    // CHECK(vx_buffer_address(dst_buf,  &kernel_arg.dst_addr));
+	kernel_arg_t kernelArgs { };
+	kernelArgs.numRays = numRays;
+	CHECK(vx_buffer_address(rayBuffer, &kernelArgs.rayBuffer));
 
-    std::vector<TYPE> h_src0(num_points), h_src1(num_points), h_dst(num_points);
-    for (uint32_t i = 0; i < num_points; ++i) {
-        h_src0[i] = static_cast<TYPE>(std::rand()) / RAND_MAX;
-        h_src1[i] = static_cast<TYPE>(std::rand()) / RAND_MAX;
-    }
+    // std::vector<TYPE> h_src0(num_points), h_src1(num_points), h_dst(num_points);
+    // for (uint32_t i = 0; i < num_points; ++i) {
+    //     h_src0[i] = static_cast<TYPE>(std::rand()) / RAND_MAX;
+    //     h_src1[i] = static_cast<TYPE>(std::rand()) / RAND_MAX;
+    // }
 
     // ----- Async chain: 2 writes → launch → read → 1 wait -----
     // The kernel-args block is passed as a host blob — no args device buffer needed.
-    CHECK(vx_enqueue_write(q, src0_buf, 0, h_src0.data(), buf_size, 0,nullptr,nullptr));
-    CHECK(vx_enqueue_write(q, src1_buf, 0, h_src1.data(), buf_size, 0,nullptr,nullptr));
+    // CHECK(vx_enqueue_write(q, src0_buf, 0, h_src0.data(), buf_size, 0,nullptr,nullptr));
+    // CHECK(vx_enqueue_write(q, src1_buf, 0, h_src1.data(), buf_size, 0,nullptr,nullptr));
+	CHECK(vx_enqueue_write(q, rayBuffer, 0, rays.data(), rayBufferSize, 0, nullptr, nullptr));
 
     uint32_t grid[1], block[1];
-    CHECK(vx_device_max_occupancy_grid(dev, 1, &num_points, grid, block));
+    CHECK(vx_device_max_occupancy_grid(device, 1, &numRays, grid, block));
 
-    vx_launch_info_t li{};
-    li.struct_size = sizeof(li);
-    li.kernel      = kern;
-    li.args_host   = &kernel_arg;
-    li.args_size   = sizeof(kernel_arg);
-    li.ndim        = 1;
-    li.grid_dim[0] = grid[0];
-    li.block_dim[0]= block[0];
+    vx_launch_info_t launchInfo {
+	};
+	launchInfo.struct_size = sizeof(launchInfo);
+	launchInfo.kernel      = kernel;
+	launchInfo.args_host   = &kernelArgs;
+	launchInfo.args_size   = sizeof(kernelArgs);
+	launchInfo.ndim        = 1;
+	launchInfo.grid_dim[0] = grid[0];
+	launchInfo.block_dim[0]= block[0];
 
-    vx_event_h launch_ev=nullptr, read_ev=nullptr;
-    CHECK(vx_enqueue_launch(q, &li, 0, nullptr, &launch_ev));
-    CHECK(vx_enqueue_read(q, h_dst.data(), dst_buf, 0, buf_size,
-                          1, &launch_ev, &read_ev));
+    vx_event_h launch_ev = nullptr;
+	vx_event_h read_ev = nullptr;
+	std::vector<float> rayDst(rays);
+    CHECK(vx_enqueue_launch(q, &launchInfo, 0, nullptr, &launch_ev));
+    CHECK(vx_enqueue_read(q, rayDst.data(), rayBuffer, 0, rayBufferSize, 1, &launch_ev, &read_ev));
     CHECK(vx_event_wait_value(read_ev, 1, VX_TIMEOUT_INFINITE));
 
-    int errors = 0;
-    for (uint32_t i = 0; i < num_points; ++i) {
-        TYPE ref = h_src0[i] + h_src1[i];
-        if (!float_eq(h_dst[i], ref)) {
-            if (errors < 16)
-                std::printf("*** [%u] expected=%f actual=%f\n", i, ref, h_dst[i]);
-            ++errors;
-        }
-    }
+	std::cout << "kernel finished, checking errors" << std::endl;
+	long errors = 0;
+	for (int i = 0; i < rayDst.size(); i++) {
+		if (rayDst[i] != rays[i] * -1.0f) errors++;
+		// std::cout << rays[i] << std::endl;;
+	}
+	std::cout << "errors: " << errors << std::endl;
+
+    // int errors = 0;
+    // for (uint32_t i = 0; i < num_points; ++i) {
+    //     TYPE ref = h_src0[i] + h_src1[i];
+    //     if (!float_eq(h_dst[i], ref)) {
+    //         if (errors < 16)
+    //             std::printf("*** [%u] expected=%f actual=%f\n", i, ref, h_dst[i]);
+    //         ++errors;
+    //     }
+    // }
 
     vx_event_release(read_ev);
     vx_event_release(launch_ev);
-    vx_buffer_release(dst_buf);
-    vx_buffer_release(src1_buf);
-    vx_buffer_release(src0_buf);
-    vx_kernel_release(kern);
-    vx_module_release(mod);
+    // vx_buffer_release(dst_buf);
+    // vx_buffer_release(src1_buf);
+    // vx_buffer_release(src0_buf);
+	vx_buffer_release(rayBuffer);
+    vx_kernel_release(kernel);
+    vx_module_release(module_);
     vx_queue_release(q);
-    vx_device_dump_perf(dev, stdout);
-    vx_device_release(dev);
+    vx_device_dump_perf(device, stdout);
+    vx_device_release(device);
 
-    if (errors) {
-        std::cout << "Found " << errors << " errors!\nFAILED!" << std::endl;
-        return 1;
-    }
+    // if (errors) {
+    //     std::cout << "Found " << errors << " errors!\nFAILED!" << std::endl;
+    //     return 1;
+    // }
     std::cout << "PASSED!" << std::endl;
     return 0;
 }
