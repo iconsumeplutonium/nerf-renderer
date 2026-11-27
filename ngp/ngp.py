@@ -111,10 +111,10 @@ class NGP(torch.nn.Module):
         features: Tensor = torch.empty((xm.shape[0], self.featuresPerEntry * len(self.gridResolutions)), device=x.device)
 
         # loop over each resolution, and figure out all sample points in a given resolution at once
-        for i, N in enumerate(self.gridResolutions):
+        for i, resolution in enumerate(self.gridResolutions):
             # figure out the corners for each point's box
-            floor: Tensor = torch.floor(xm * N)
-            ceil: Tensor = torch.ceil(xm * N)
+            floor: Tensor = torch.floor(xm * resolution)
+            ceil: Tensor = torch.ceil(xm * resolution)
 
             # get the integer coordinates for all 8 corners
             vertices: Tensor = torch.zeros((xm.shape[0], 8, 3), dtype=torch.int64, device=x.device)
@@ -143,7 +143,7 @@ class NGP(torch.nn.Module):
             # the final feature. abuses pytorch's grid_sample function to do trilinear interpolation for each point's grid corners
             features[:, i * 2:(i + 1) * 2] = torch.nn.functional.grid_sample(
                 volume,
-                ((xm * N - floor) - 0.5).unsqueeze(1).unsqueeze(1).unsqueeze(1),
+                ((xm * resolution - floor) - 0.5).unsqueeze(1).unsqueeze(1).unsqueeze(1),
                 align_corners=False,  # same as the old default, just silences the warning
             ).squeeze(-1).squeeze(-1).squeeze(-1)
 
